@@ -1,12 +1,20 @@
 #include "ofxLibfreenect2.h"
 
+// TODO:
+//   - disable rgb or depth stream
 //--------------------------------------------------------------------------------
+
+// static content
+ofxLibfreenect2Context ofxLibfreenect2::_lf2Context;
+
 ofxLibfreenect2::ofxLibfreenect2(){
     bNewFrame       = false;
     bNewBuffer      = false;
     bGrabberInited  = false;
     bIsConnected    = false;
     bUseTexture     = true;
+    _bUseVideo      = true;
+    _bUseDepth      = true;
     lastFrameNo     = -1;
 
     //set default distance range to 50cm - 600cm
@@ -26,22 +34,23 @@ bool ofxLibfreenect2::setup(int w, int h)
 }
 
 //--------------------------------------------------------------------
-bool ofxLibfreenect2::init(bool texture) {
+bool ofxLibfreenect2::init(bool texture, bool video, bool depth) {
 	if(isConnected()) {
 		ofLogWarning("ofxLibfreenect2") << "init(): do not call init while ofxLibfreenect2 is running!";
 		return false;
 	}
 
+    if( !depth && !video ) {
+        ofLogWarning("ofxLibfreenect2") << "init(): Disabling both depth and rgb streams is not possible!" << std::endl;
+        return false;
+    } 
+
 	//clear();
     bGrabberInited = false;
 
-    if(freenect2.enumerateDevices() == 0)
-    {
-		ofLogError("ofxLibfreenect2") << "no Kinect2 device connected!";
-		return false;
-	}
-
 	bUseTexture = texture;
+    _bUseVideo = video;
+    _bUseDepth = depth;
 
 	videoPixels.allocate(width, height, GL_RGBA);
 	videoPixelsFront.allocate(width, height, GL_RGBA);
@@ -66,9 +75,6 @@ bool ofxLibfreenect2::init(bool texture) {
 		videoTex.allocate(width, height, GL_RGB);
 	}
 
-    if(!pipeline) {
-        pipeline = new libfreenect2::OpenCLPacketPipeline();
-	}
 
 	bGrabberInited = true;
 
@@ -94,47 +100,44 @@ bool ofxLibfreenect2::isConnected(int id)
 
 //--------------------------------------------------------------------------------
 bool ofxLibfreenect2::open(){
+    return open(-1);
+}
+
+bool ofxLibfreenect2::open(int iIndex) {
+    std::string serial = _lf2Context.getDeviceSerialNumber(iIndex);
+    return open(serial);
+}
+
+bool ofxLibfreenect2::open(std::string iSerial) {
     close();
 
-    bNewFrame  = false;
-    bNewBuffer = false;
+    bool ret = _lf2Context.open(*this, iSerial);
 
-    serial = freenect2.getDefaultDeviceSerialNumber();
-
-
-	if(pipeline)
-	{
-		dev = freenect2.openDevice(serial, pipeline);
-	}
-	else
-	{
-		dev = freenect2.openDevice(serial);
-	}
-
-	if(dev == 0)
-	{
-		ofLogError("ofxLibfreenect2") << "Failure opening device!" << std::endl;
-		return false;
-	} else {
+    if(ret)
+    {
         ofLogNotice("ofxLibfreenect2") << "Opening device with serial: " << dev->getSerialNumber() << " device firmware: " << dev->getFirmwareVersion();
-		lastFrameNo = -1;
-		startThread();
-	}
+        lastFrameNo = -1;
+        startThread();
+    } else {
+        ofLogError("ofxLibfreenect2") << "Failure opening device with serial = " << iSerial << " !" << std::endl;
+    }
 
     bIsConnected = true;
 
-    return true;
+    return ret;
 }
 
-void ofxLibfreenect2::listDevices() {
-    if(!isInitialized())
-		init();
 
-    int numDevices = freenect2.enumerateDevices();
+
+void ofxLibfreenect2::listDevices() {
+    if(!isInitialized()) {
+        init();
+    }
+
+    int numDevices = _lf2Context.enumerateDevices();
 
 	if(numDevices == 0) {
 		ofLogNotice("ofxLibfreenect2") << "no devices found";
-		return;
 	}
 	else if(numDevices == 1) {
 		ofLogNotice("ofxLibfreenect2") << 1 << " device found";
@@ -148,31 +151,45 @@ void ofxLibfreenect2::listDevices() {
 //--------------------------------------------------------------------------------
 void ofxLibfreenect2::threadedFunction(){
     //listener = new listener(libfreenect2::Frame::Color | libfreenect2::Frame::Ir | libfreenect2::Frame::Depth);
-    libfreenect2::SyncMultiFrameListener listener(libfreenect2::Frame::Color | libfreenect2::Frame::Ir | libfreenect2::Frame::Depth);
+    int types = 0;
+    if( _bUseVideo ) {
+        types |= libfreenect2::Frame::Color;
+    }
+    if( _bUseDepth ) {
+        types |= libfreenect2::Frame::Depth;
+    } 
+    libfreenect2::SyncMultiFrameListener listener(types);
     libfreenect2::Frame undistorted(512, 424, 4), registered(512, 424, 4);
 
+    
     dev->setColorFrameListener(&listener);
     dev->setIrAndDepthFrameListener(&listener);
-    dev->start();
+    dev->startStreams(_bUseVideo, _bUseDepth);
 
     registration = new libfreenect2::Registration(dev->getIrCameraParams(), dev->getColorCameraParams());
 
     while(isThreadRunning()){
 		listener.waitForNewFrame(frames);
 		libfreenect2::Frame *rgb = frames[libfreenect2::Frame::Color];
-		libfreenect2::Frame *ir = frames[libfreenect2::Frame::Ir];
+		//libfreenect2::Frame *ir = frames[libfreenect2::Frame::Ir];
 		libfreenect2::Frame *depth = frames[libfreenect2::Frame::Depth];
 
-		registration->apply(rgb,depth,&undistorted,&registered);
+        if( _bUseVideo && _bUseDepth ) {
+		    registration->apply(rgb,depth,&undistorted,&registered);
+        }
 
         lock();
 
 
-        videoPixelsBack.setFromPixels(rgb->data, rgb->width, rgb->height, OF_PIXELS_RGBA);
-        depthPixelsBack.setFromPixels((float *)depth->data, ir->width, ir->height, 1);
+        if( _bUseVideo ) {
+            videoPixelsBack.setFromPixels(rgb->data, rgb->width, rgb->height, OF_PIXELS_RGBA);
+            videoPixelsFront.swap(videoPixelsBack);
+        }
+        if( _bUseDepth ) {
+            depthPixelsBack.setFromPixels((float *)depth->data, depth->width, depth->height, 1);
+            depthPixelsFront.swap(depthPixelsBack);
+        }
 
-        videoPixelsFront.swap(videoPixelsBack);
-        depthPixelsFront.swap(depthPixelsBack);
 
   //      lock();
         bNewBuffer = true;
@@ -185,8 +202,10 @@ void ofxLibfreenect2::threadedFunction(){
 
     dev->stop();
     dev->close();
+    dev = 0;
 
     delete registration;
+    registration = 0;
 }
 
 //--------------------------------------------------------------------------------
@@ -365,6 +384,141 @@ void ofxLibfreenect2::close()
     bIsConnected    = false;
     lastFrameNo     = -1;
 
+}
+
+void ofxLibfreenect2::setDevice(libfreenect2::Freenect2Device * iDevice) {
+    dev = iDevice;
+}
+
+void ofxLibfreenect2::setDeviceId(int iId) {
+    deviceId = iId;
+}
+
+static bool sortKinectPairs(ofxLibfreenect2Context::freenect2Pair A, ofxLibfreenect2Context::freenect2Pair B){
+    return A.serial < B.serial;
+}
+
+ofxLibfreenect2Context::ofxLibfreenect2Context() {
+
+    _bInited = false;
+    _pipeline = 0;
+}
+
+ofxLibfreenect2Context::~ofxLibfreenect2Context() {
+
+    _bInited = false;
+    _deviceList.clear();
+    _pipeline = 0;
+
+}
+
+void ofxLibfreenect2Context::init() {
+
+    if( _bInited ) {
+        return;
+    }
+
+    _pipeline = new libfreenect2::OpenCLPacketPipeline();
+
+    int nbDevices = enumerateDevices();
+    for( int i = 0 ; i < nbDevices ; i++ ) {
+        freenect2Pair kp2;
+        kp2.id = i;
+        kp2.serial = _freenect2.getDeviceSerialNumber(i);
+        kp2.kinect = 0;
+        kp2.connected = false;
+        _deviceList.push_back(kp2);
+    }
+
+    // sort devices by serial number
+    sort(_deviceList.begin(), _deviceList.end(), sortKinectPairs);
+    _bInited = true;
+}
+
+bool ofxLibfreenect2Context::isInited() {
+    return _bInited;
+}
+
+int ofxLibfreenect2Context::enumerateDevices() {
+    return _freenect2.enumerateDevices();
+}
+
+std::string ofxLibfreenect2Context::getDeviceSerialNumber(int iIndex) {
+    if( !isInited() ) {
+        init();
+    }
+
+    std::string serial("");
+    if( iIndex < 0 ) {
+        // let's find the first kinect not connected
+        for( int i = 0 ; i < _deviceList.size() ; i++ ) {
+            if( !_deviceList[i].connected) {
+                serial = _deviceList[i].serial;
+                ofLogWarning("ofxLibfreenect2") << "getDeviceSerialNumber will return: " << serial;
+                break;
+            }
+        }
+    }
+    else {
+        serial = _freenect2.getDeviceSerialNumber(iIndex);
+    }
+
+    return serial;
+}
+
+bool ofxLibfreenect2Context::open(ofxLibfreenect2& iLibfreenect2, std::string iSerial) {
+    if( !isInited() ) {
+        init();
+    }
+
+    // we first check that device is not aready opened
+    bool ret = true;
+    bool alreadyOpened = false;
+    int idx;
+    for( idx = _deviceList.size() - 1 ; idx >= 0 ; idx-- ) {
+        if( _deviceList[idx].serial == iSerial ) {
+            if( _deviceList[idx].connected ) {
+                alreadyOpened = true;
+            }
+            break;
+        }
+    }
+
+    if( alreadyOpened ) {
+        ofLogWarning("ofxLibfreenect2") << "open(ofxLibfreenect2&, std::string): kinect already opened!";
+        ret = false;
+    }
+    else {
+        libfreenect2::Freenect2Device * kinect = _freenect2.openDevice(iSerial, _pipeline);
+        if( kinect ) {
+          iLibfreenect2.setDevice(kinect);
+          iLibfreenect2.setDeviceId(_deviceList[idx].id);
+          _deviceList[idx].connected = true;
+          _deviceList[idx].kinect = &iLibfreenect2;
+        }
+        else {
+            ofLogWarning("ofxLibfreenect2") << "open(ofxLibfreenect2&, std::string): kinect returned by openDevice is NULL!";
+            ret = false;
+        }
+    }
+    return ret;
+}
+
+void ofxLibfreenect2Context::close(ofxLibfreenect2& kinect) {
+    if( isInited() ) {
+        bool found = false;
+        for( int idx = _deviceList.size() - 1 ; idx >= 0 ; idx-- ) {
+            if( _deviceList[idx].kinect == &kinect && _deviceList[idx].connected == true) {
+                _deviceList[idx].connected = false;
+                _deviceList[idx].kinect = 0;
+                found = true;
+                break;
+            }
+        }
+        if( found ) {
+            kinect.close();
+        }
+    }
 }
 
 
