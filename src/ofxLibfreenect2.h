@@ -17,7 +17,7 @@ class ofxLibfreenect2 : public ofThread, public ofxBase3DVideo {
         ofxLibfreenect2();
         ~ofxLibfreenect2();
 
-        // WARNING, the boolean and their order are not the same as in ofxKinect
+        // WARNING, the booelan and their order are not the same as in ofxKinect
         // this order is kept for compatibility with first version of
         // ofxLibfreenect2 which was managing only texture
         bool init(bool texture=true, bool video=true, bool depth=true);

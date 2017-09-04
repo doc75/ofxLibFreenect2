@@ -110,8 +110,9 @@ bool ofxLibfreenect2::open(int iIndex) {
 
 bool ofxLibfreenect2::open(std::string iSerial) {
     close();
+    serial = iSerial;
 
-    bool ret = _lf2Context.open(*this, iSerial);
+    bool ret = _lf2Context.open(*this, serial);
 
     if(ret)
     {
@@ -119,7 +120,7 @@ bool ofxLibfreenect2::open(std::string iSerial) {
         lastFrameNo = -1;
         startThread();
     } else {
-        ofLogError("ofxLibfreenect2") << "Failure opening device with serial = " << iSerial << " !" << std::endl;
+        ofLogError("ofxLibfreenect2") << "Failure opening device with serial = " << serial << " !" << std::endl;
     }
 
     bIsConnected = true;
